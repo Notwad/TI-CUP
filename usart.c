@@ -1,0 +1,208 @@
+#include "../SYSTEM/sys/sys.h"
+#include "../SYSTEM/usart/usart.h"
+
+
+/* 如果使用os,则包括下面的头文件即可. */
+#if SYS_SUPPORT_OS
+#include "includes.h" /* os ʹ�� */
+#endif
+
+/******************************************************************************************/
+/*加入以下代码, 支持printf函数, 而不需要选择use MicroLIB */
+
+#if 1
+
+#if (__ARMCC_VERSION >= 6010050)            /* 使用AC6编译器时 */
+__asm(".global __use_no_semihosting\n\t");  /* 声明不使用半主机模式 */
+__asm(".global __ARM_use_no_argv \n\t");    /* AC6下需要声明main函数为无参数格式，否则部分例程可能出现半主机模式 */
+
+#else
+/* ʹ��AC5������ʱ, Ҫ�����ﶨ��__FILE �� ��ʹ�ð�����ģʽ */
+#pragma import(__use_no_semihosting)
+
+struct __FILE
+{
+    int handle;
+    /* Whatever you require here. If the only file you are using is */
+    /* standard output using printf() for debugging, no file handling */
+    /* is required. */
+};
+
+#endif
+
+/* ��ʹ�ð�����ģʽ��������Ҫ�ض���_ttywrch\_sys_exit\_sys_command_string����,��ͬʱ����AC6��AC5ģʽ */
+int _ttywrch(int ch)
+{
+    ch = ch;
+    return ch;
+}
+
+/* ����_sys_exit()�Ա���ʹ�ð�����ģʽ */
+void _sys_exit(int x)
+{
+    x = x;
+}
+
+char *_sys_command_string(char *cmd, int len)
+{
+    return NULL;
+}
+
+
+/* FILE �� stdio.h���涨��. */
+FILE __stdout;
+
+/* MDK����Ҫ�ض���fputc����, printf�������ջ�ͨ������fputc����ַ��������� */
+int fputc(int ch, FILE *f)
+{
+    while ((USART_UX->SR & 0X40) == 0);     /* �ȴ���һ���ַ�������� */
+
+    USART_UX->DR = (uint8_t)ch;             /* ��Ҫ���͵��ַ� ch д�뵽DR�Ĵ��� */
+    return ch;
+}
+#endif
+/******************************************************************************************/
+
+#if USART_EN_RX /*���ʹ���˽���*/
+
+/* ���ջ���, ���USART_REC_LEN���ֽ�. */
+uint8_t g_usart_rx_buf[USART_REC_LEN];
+
+/*  ����״̬
+ *  bit15��      ������ɱ�־
+ *  bit14��      ���յ�0x0d
+ *  bit13~0��    ���յ�����Ч�ֽ���Ŀ
+*/
+uint16_t g_usart_rx_sta = 0;
+
+uint8_t g_rx_buffer[RXBUFFERSIZE];  /* HAL��ʹ�õĴ��ڽ��ջ��建���� �ж���ַ����н��� */
+
+
+
+
+
+UART_HandleTypeDef g_uart1_handle;  /* ʹ���첽ͨѶ UART��� */
+
+/**
+ * @brief       ����1��ʼ������
+ * @param       baudrate: ������, �����Լ���Ҫ���ò�����ֵ
+ * @note        ע��: ����������ȷ��ʱ��Դ, ���򴮿ڲ����ʾͻ������쳣.
+ *              �����USART��ʱ��Դ��sys_stm32_clock_init()�������Ѿ����ù���.
+ * @retval      ��
+ */
+void usart_init(uint32_t baudrate)
+{
+    /*����1 UART1 �ĳ�ʼ������*/
+    g_uart1_handle.Instance = USART1;                                       /* USART1 �õ�����1 */
+    g_uart1_handle.Init.BaudRate = baudrate;                                  /* ������ */
+    g_uart1_handle.Init.WordLength = UART_WORDLENGTH_8B;                      /* �ֳ�Ϊ8λ���ݸ�ʽ */
+    g_uart1_handle.Init.StopBits = UART_STOPBITS_1;                           /* һ��ֹͣλ */
+    g_uart1_handle.Init.Parity = UART_PARITY_NONE;                            /* ����żУ��λ */
+    g_uart1_handle.Init.HwFlowCtl = UART_HWCONTROL_NONE;                      /* ��Ӳ������ */
+    g_uart1_handle.Init.Mode = UART_MODE_TX_RX;                               /* �շ�ģʽ */
+    HAL_UART_Init(&g_uart1_handle);                                           /* HAL_UART_Init()��ʹ��UART1 �ṹ��ָ��Ҫ�õ�ַ��ȡ��ַ*/
+
+    /* �ú����Ὺ�������жϣ���־λUART_IT_RXNE���������ý��ջ����Լ����ջ���������������  �첽�����жϴ� ��һ���β��Ǵ��ڵľ�� �ڶ����β����ǻ�������ǿתһ�±�������  �������β����ַ�����Ӧ�ڶ�������ȥ���ַ��ĳ���*/
+    HAL_UART_Receive_IT(&g_uart1_handle, (uint8_t *)g_rx_buffer, RXBUFFERSIZE); 
+}
+
+/**
+ * @brief       UART�ײ��ʼ������
+ * @param       huart: UART�������ָ��
+ * @note        �˺����ᱻHAL_UART_Init()����
+ *              ���ʱ��ʹ�ܣ��������ã��ж�����
+ * @retval      ��
+ */
+void HAL_UART_MspInit(UART_HandleTypeDef *huart)                /*����MSP�ص�����*/
+{
+    GPIO_InitTypeDef gpio_init_struct;                          /*���崮�ڵĽṹ�壬���д��ڳ�ʼ��*/
+
+    if (huart->Instance == USART_UX)                            /* ����Ǵ���1�����д���1 MSP��ʼ�� */
+    {
+        USART_TX_GPIO_CLK_ENABLE();                             /* ʹ�ܴ���TX��ʱ�� */
+        USART_RX_GPIO_CLK_ENABLE();                             /* ʹ�ܴ���RX��ʱ�� */
+        USART_UX_CLK_ENABLE();                                  /* ʹ�ܴ���ʱ�� */
+
+        gpio_init_struct.Pin = USART_TX_GPIO_PIN;               /* ������ݵ� PA9 ���ڷ������ź� */
+        gpio_init_struct.Mode = GPIO_MODE_AF_PP;                /* ����������� */
+        gpio_init_struct.Pull = GPIO_PULLUP;                    /* ���� */
+        gpio_init_struct.Speed = GPIO_SPEED_FREQ_HIGH;          /* IO�ٶ�����Ϊ���� */
+        HAL_GPIO_Init(USART_TX_GPIO_PORT, &gpio_init_struct);
+                
+        gpio_init_struct.Pin = USART_RX_GPIO_PIN;               /* �������ݵ� PA10 ����RX�� ģʽ���� */
+        gpio_init_struct.Pull= GPIO_PULLUP;                     /*PA10 ʹ����������ģʽ*/
+        gpio_init_struct.Mode = GPIO_MODE_AF_INPUT;    
+        HAL_GPIO_Init(USART_RX_GPIO_PORT, &gpio_init_struct);   /* ����RX�� �������ó�����ģʽ */
+        
+#if USART_EN_RX
+        HAL_NVIC_EnableIRQ(USART1_IRQn);                      /* ʹ��USART1�ж�ͨ�� */
+        HAL_NVIC_SetPriority(USART1_IRQn, 3, 3);              /* ��2��������ȼ�:��ռ���ȼ�3�������ȼ�3 */
+#endif
+    }
+}
+
+/**
+ * @brief       �������ݽ��ջص�����
+                ���ݴ������������
+ * @param       huart:���ھ��
+ * @retval      ��
+ */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART_UX)                    /* ����Ǵ���1 */
+    {
+        if ((g_usart_rx_sta & 0x8000) == 0)             /* ����δ��� */
+        {
+            if (g_usart_rx_sta & 0x4000)                /* ���յ���0x0d�����س����� */
+            {
+                if (g_rx_buffer[0] != 0x0a)             /* ���յ��Ĳ���0x0a�������ǻ��м��� */
+                {
+                    g_usart_rx_sta = 0;                 /* ���մ���,���¿�ʼ */
+                }
+                else                                    /* ���յ�����0x0a�������м��� */
+                {
+                    g_usart_rx_sta |= 0x8000;           /* ��������� */
+                }
+            }
+            else                                        /* ��û�յ�0X0d�����س����� */
+            {
+                if (g_rx_buffer[0] == 0x0d)
+                    g_usart_rx_sta |= 0x4000;
+                else
+                {
+                    g_usart_rx_buf[g_usart_rx_sta & 0X3FFF] = g_rx_buffer[0];
+                    g_usart_rx_sta++;
+
+                    if (g_usart_rx_sta > (USART_REC_LEN - 1))/*�ֽڳ������������ֽ�200������ʧ��*/
+                    {
+                        g_usart_rx_sta = 0;             /* �������ݴ���,���¿�ʼ���� */
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief       ����1���жϷ�����
+                ע��,��ȡUSARTx->SR�ܱ���Ī������Ĵ���
+ * @param       ��
+ * @retval      ��
+ */
+void USART1_IRQHandler(void)
+{
+#if SYS_SUPPORT_OS                                                   /* ʹ��OS */
+    OSIntEnter();
+#endif
+    HAL_UART_IRQHandler(&g_uart1_handle);                               /* �����Ǿ��&g_uart1_handle ����HAL���жϴ������ú��� ������жϣ����ҵ�������Ļص�����*/
+
+    while (HAL_UART_Receive_IT(&g_uart1_handle, (uint8_t *)g_rx_buffer, RXBUFFERSIZE) != HAL_OK)     /* ���¿����жϲ��������� */
+    {
+        /* ��������Ῠ�������� */
+    }
+
+#if SYS_SUPPORT_OS                                                   /* ʹ��OS */
+    OSIntExit();
+#endif
+}
+#endif
